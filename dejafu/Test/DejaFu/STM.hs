@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -8,7 +9,7 @@
 -- License     : MIT
 -- Maintainer  : Michael Walker <mike@barrucadu.co.uk>
 -- Stability   : experimental
--- Portability : GeneralizedNewtypeDeriving, RankNTypes, TypeFamilies
+-- Portability : FlexibleContexts, GeneralizedNewtypeDeriving, RankNTypes, TypeFamilies
 --
 -- A 'MonadSTM' implementation, which can be run on top of 'IO' or
 -- 'ST'.
@@ -26,23 +27,20 @@ module Test.DejaFu.STM
   , runTransaction
   ) where
 
-import           Control.Monad            (unless)
 import           Control.Monad.Catch      (MonadCatch(..), MonadThrow(..))
 import           Control.Monad.Cont       (cont)
 import           Control.Monad.Ref        (MonadRef)
-import           Control.Monad.ST         (ST)
-import           Data.IORef               (IORef)
-import           Data.STRef               (STRef)
 
 import qualified Control.Monad.STM.Class  as C
 import           Test.DejaFu.Common
+import qualified Test.DejaFu.Heap         as H
 import           Test.DejaFu.STM.Internal
 
--- | @since 0.3.0.0
-newtype STMLike n r a = S { runSTM :: M n r a } deriving (Functor, Applicative, Monad)
+-- | @since unreleased
+newtype STMLike heap key monad a = S { runSTM :: M heap key monad a } deriving (Functor, Applicative, Monad)
 
 -- | Create a new STM continuation.
-toSTM :: ((a -> STMAction n r) -> STMAction n r) -> STMLike n r a
+toSTM :: ((a -> STMAction heap key monad) -> STMAction heap key monad) -> STMLike heap key monad a
 toSTM = S . cont
 
 -- | A 'MonadSTM' implementation using @ST@, it encapsulates a single
@@ -53,7 +51,7 @@ toSTM = S . cont
 -- some reason).
 --
 -- @since 0.3.0.0
-type STMST t = STMLike (ST t) (STRef t)
+type STMST t = STMLike (H.STHeap t)
 
 -- | A 'MonadSTM' implementation using @ST@, it encapsulates a single
 -- atomic transaction. The environment, that is, the collection of
@@ -63,16 +61,16 @@ type STMST t = STMLike (ST t) (STRef t)
 -- some reason).
 --
 -- @since 0.3.0.0
-type STMIO = STMLike IO IORef
+type STMIO = STMLike H.IOHeap
 
-instance MonadThrow (STMLike n r) where
+instance MonadThrow (STMLike heap key monad) where
   throwM = toSTM . const . SThrow
 
-instance MonadCatch (STMLike n r) where
+instance MonadCatch (STMLike heap key monad) where
   catch (S stm) handler = toSTM (SCatch (runSTM . handler) stm)
 
-instance C.MonadSTM (STMLike n r) where
-  type TVar (STMLike n r) = TVar r
+instance C.MonadSTM (STMLike heap key monad) where
+  type TVar (STMLike heap key monad) = TVar key
 
   retry = toSTM (const SRetry)
 
@@ -88,12 +86,12 @@ instance C.MonadSTM (STMLike n r) where
 -- 'TVarId'. If the transaction ended by calling 'retry', any 'TVar'
 -- modifications are undone.
 --
--- @since 0.4.0.0
-runTransaction :: MonadRef r n
-               => STMLike n r a -> IdSource -> n (Result a, IdSource, TTrace)
-runTransaction ma tvid = do
-  (res, undo, tvid', trace) <- doTransaction (runSTM ma) tvid
-
-  unless (isSTMSuccess res) undo
-
-  pure (res, tvid', trace)
+-- @since unreleased
+runTransaction :: (H.Heap heap key monad, MonadRef r monad)
+  => STMLike heap key monad a
+  -> IdSource
+  -> heap
+  -> monad (heap, Result a, IdSource, TTrace)
+runTransaction ma tvid heap = do
+  (res, heap', tvid', trace) <- doTransaction heap (runSTM ma) tvid
+  pure (if isSTMSuccess res then heap' else heap, res, tvid', trace)

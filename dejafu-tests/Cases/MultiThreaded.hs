@@ -6,7 +6,8 @@ import Test.DejaFu (Failure(..), gives, gives')
 import Test.Framework (Test)
 
 import Control.Concurrent.Classy hiding (newQSemN, signalQSemN, waitQSemN)
-import Test.DejaFu.Conc (ConcT, subconcurrency)
+import Test.DejaFu.Conc (Conc, subconcurrency)
+import Test.DejaFu.Heap (Heap)
 
 import Utils
 import QSemN
@@ -270,7 +271,7 @@ schedDaemon = do
 -- Subconcurrency
 
 -- | Subcomputation deadlocks sometimes.
-scDeadlock1 :: Monad n => ConcT r n (Either Failure ())
+scDeadlock1 :: Heap heap key monad => Conc heap key monad (Either Failure ())
 scDeadlock1 = do
   var <- newEmptyMVar
   subconcurrency $ do
@@ -279,7 +280,7 @@ scDeadlock1 = do
 
 -- | Subcomputation deadlocks sometimes, and action after it still
 -- happens.
-scDeadlock2 :: Monad n => ConcT r n (Either Failure (), ())
+scDeadlock2 :: Heap heap key monad => Conc heap key monad (Either Failure (), ())
 scDeadlock2 = do
   var <- newEmptyMVar
   res <- subconcurrency $ do
@@ -288,7 +289,7 @@ scDeadlock2 = do
   (,) <$> pure res <*> readMVar var
 
 -- | Subcomputation successfully completes.
-scSuccess :: Monad n => ConcT r n (Either Failure ())
+scSuccess :: Heap heap key monad => Conc heap key monad (Either Failure ())
 scSuccess = do
   var <- newMVar ()
   subconcurrency $ do
@@ -297,7 +298,7 @@ scSuccess = do
     takeMVar out
 
 -- | Illegal usage
-scIllegal :: Monad n => ConcT r n ()
+scIllegal :: Heap heap key monad => Conc heap key monad ()
 scIllegal = do
   var <- newEmptyMVar
   void . fork $ readMVar var
@@ -305,7 +306,7 @@ scIllegal = do
 
 -- | Test case from issue 71. This won't fail if the bug is
 -- reintroduced, it will just hang.
-scIssue71 :: Monad n => ConcT r n ()
+scIssue71 :: Heap heap key monad => Conc heap key monad ()
 scIssue71 = do
   let ma ||| mb = do { j1 <- spawn ma; j2 <- spawn mb; takeMVar j1; takeMVar j2; pure () }
   s <- newEmptyMVar
@@ -313,7 +314,7 @@ scIssue71 = do
   pure ()
 
 -- | Test case from issue 81.
-scIssue81 :: Monad n => ConcT r n (Either Failure (), Int)
+scIssue81 :: Heap heap key monad => Conc heap key monad (Either Failure (), Int)
 scIssue81 = do
   s <- newQSemN 0
   let interfere = waitQSemN s 0 >> signalQSemN s 0

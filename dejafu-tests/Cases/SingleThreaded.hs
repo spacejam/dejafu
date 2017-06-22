@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Cases.SingleThreaded where
 
@@ -11,7 +12,8 @@ import Test.HUnit (test)
 import Test.HUnit.DejaFu (testDejafu)
 
 import Control.Concurrent.Classy
-import Test.DejaFu.Conc (ConcT, subconcurrency)
+import Test.DejaFu.Conc (Conc, subconcurrency)
+import Test.DejaFu.Heap (Heap)
 
 import Utils
 
@@ -287,17 +289,17 @@ capsSet = do
 -- Subconcurrency
 
 -- | Subcomputation deadlocks.
-scDeadlock1 :: Monad n => ConcT r n (Either Failure ())
+scDeadlock1 :: Heap heap key monad => Conc heap key monad (Either Failure ())
 scDeadlock1 = subconcurrency (newEmptyMVar >>= readMVar)
 
 -- | Subcomputation deadlocks, and action after it still happens.
-scDeadlock2 :: Monad n => ConcT r n (Either Failure (), ())
+scDeadlock2 :: Heap heap key monad => Conc heap key monad (Either Failure (), ())
 scDeadlock2 = do
   var <- newMVar ()
   (,) <$> subconcurrency (putMVar var ()) <*> readMVar var
 
 -- | Subcomputation successfully completes.
-scSuccess :: Monad n => ConcT r n (Either Failure ())
+scSuccess :: Heap heap key monad => Conc heap key monad (Either Failure ())
 scSuccess = do
   var <- newMVar ()
   subconcurrency (takeMVar var)

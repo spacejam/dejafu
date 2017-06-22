@@ -1,9 +1,11 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : Test.DejaFu.Conc
@@ -11,7 +13,7 @@
 -- License     : MIT
 -- Maintainer  : Michael Walker <mike@barrucadu.co.uk>
 -- Stability   : experimental
--- Portability : FlexibleInstances, GeneralizedNewtypeDeriving, MultiParamTypeClasses, RankNTypes, TypeFamilies, TypeSynonymInstances
+-- Portability : FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving, MultiParamTypeClasses, RankNTypes, TypeFamilies, TypeSynonymInstances, UndecidableInstances
 --
 -- Deterministic traced execution of concurrent computations.
 --
@@ -19,8 +21,8 @@
 -- out to the supplied scheduler after each step to determine which
 -- thread runs next.
 module Test.DejaFu.Conc
-  ( -- * The @ConcT@ monad transformer
-    ConcT
+  ( -- * The @Conc@ monad
+    Conc
   , ConcST
   , ConcIO
 
@@ -53,36 +55,34 @@ import qualified Control.Monad.IO.Class           as IO
 import           Control.Monad.Ref                (MonadRef)
 import qualified Control.Monad.Ref                as Re
 import           Control.Monad.ST                 (ST)
-import           Control.Monad.Trans.Class        (MonadTrans(..))
 import qualified Data.Foldable                    as F
-import           Data.IORef                       (IORef)
-import           Data.STRef                       (STRef)
 import           Test.DejaFu.Schedule
 
 import qualified Control.Monad.Conc.Class         as C
 import           Test.DejaFu.Common
 import           Test.DejaFu.Conc.Internal
 import           Test.DejaFu.Conc.Internal.Common
+import qualified Test.DejaFu.Heap                 as H
 import           Test.DejaFu.STM
 
--- | @since 0.6.0.0
-newtype ConcT r n a = C { unC :: M n r a } deriving (Functor, Applicative, Monad)
+-- | @since unreleased
+newtype Conc heap key monad a = C { unC :: M heap key monad a } deriving (Functor, Applicative, Monad)
 
 -- | A 'MonadConc' implementation using @ST@, this should be preferred
 -- if you do not need 'liftIO'.
 --
 -- @since 0.4.0.0
-type ConcST t = ConcT (STRef t) (ST t)
+type ConcST t = Conc (H.STHeap t) (H.STKey t) (ST t)
 
 -- | A 'MonadConc' implementation using @IO@.
 --
 -- @since 0.4.0.0
-type ConcIO = ConcT IORef IO
+type ConcIO = Conc H.IOHeap H.IOKey IO
 
-toConc :: ((a -> Action n r) -> Action n r) -> ConcT r n a
+toConc :: ((a -> Action heap key monad) -> Action heap key monad) -> Conc heap key monad a
 toConc = C . cont
 
-wrap :: (M n r a -> M n r a) -> ConcT r n a -> ConcT r n a
+wrap :: (M heap key monad a -> M heap key monad a) -> Conc heap key monad a -> Conc heap key monad a
 wrap f = C . f . unC
 
 instance IO.MonadIO ConcIO where
@@ -91,7 +91,7 @@ instance IO.MonadIO ConcIO where
 instance Ba.MonadBase IO ConcIO where
   liftBase = IO.liftIO
 
-instance Re.MonadRef (CRef r) (ConcT r n) where
+instance Re.MonadRef (CRef key) (Conc heap key monad) where
   newRef a = toConc (ANewCRef "" a)
 
   readRef ref = toConc (AReadCRef ref)
@@ -100,28 +100,25 @@ instance Re.MonadRef (CRef r) (ConcT r n) where
 
   modifyRef ref f = toConc (AModCRef ref (\a -> (f a, ())))
 
-instance Re.MonadAtomicRef (CRef r) (ConcT r n) where
+instance Re.MonadAtomicRef (CRef key) (Conc heap key monad) where
   atomicModifyRef ref f = toConc (AModCRef ref f)
 
-instance MonadTrans (ConcT r) where
-  lift ma = toConc (\c -> ALift (fmap c ma))
-
-instance Ca.MonadCatch (ConcT r n) where
+instance Ca.MonadCatch (Conc heap key monad) where
   catch ma h = toConc (ACatching (unC . h) (unC ma))
 
-instance Ca.MonadThrow (ConcT r n) where
+instance Ca.MonadThrow (Conc heap key monad) where
   throwM e = toConc (\_ -> AThrow e)
 
-instance Ca.MonadMask (ConcT r n) where
+instance Ca.MonadMask (Conc heap key monad) where
   mask                mb = toConc (AMasking MaskedInterruptible   (\f -> unC $ mb $ wrap f))
   uninterruptibleMask mb = toConc (AMasking MaskedUninterruptible (\f -> unC $ mb $ wrap f))
 
-instance Monad n => C.MonadConc (ConcT r n) where
-  type MVar     (ConcT r n) = MVar r
-  type CRef     (ConcT r n) = CRef r
-  type Ticket   (ConcT r n) = Ticket
-  type STM      (ConcT r n) = STMLike n r
-  type ThreadId (ConcT r n) = ThreadId
+instance H.Heap heap key monad => C.MonadConc (Conc heap key monad) where
+  type MVar     (Conc heap key monad) = MVar key
+  type CRef     (Conc heap key monad) = CRef key
+  type Ticket   (Conc heap key monad) = Ticket
+  type STM      (Conc heap key monad) = STMLike heap key monad
+  type ThreadId (Conc heap key monad) = ThreadId
 
   -- ----------
 
@@ -190,15 +187,15 @@ instance Monad n => C.MonadConc (ConcT r n) where
 -- nonexistent thread. In either of those cases, the computation will
 -- be halted.
 --
--- @since 0.6.0.0
-runConcurrent :: MonadRef r n
-              => Scheduler s
-              -> MemType
-              -> s
-              -> ConcT r n a
-              -> n (Either Failure a, s, Trace)
+-- @since unreleased
+runConcurrent :: (H.Heap heap key monad, MonadRef r monad)
+  => Scheduler s
+  -> MemType
+  -> s
+  -> Conc heap key monad a
+  -> monad (Either Failure a, s, Trace)
 runConcurrent sched memtype s ma = do
-  (res, ctx, trace, _) <- runConcurrency sched memtype s initialIdSource 2 (unC ma)
+  (res, ctx, trace, _) <- runConcurrency sched memtype s initialIdSource 2 H.empty (unC ma)
   pure (res, cSchedState ctx, F.toList trace)
 
 -- | Run a concurrent computation and return its result.
@@ -209,5 +206,5 @@ runConcurrent sched memtype s ma = do
 -- @IllegalSubconcurrency@.
 --
 -- @since 0.6.0.0
-subconcurrency :: ConcT r n a -> ConcT r n (Either Failure a)
+subconcurrency :: Conc heap key monad a -> Conc heap key monad (Either Failure a)
 subconcurrency ma = toConc (ASub (unC ma))

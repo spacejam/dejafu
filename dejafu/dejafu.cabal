@@ -41,13 +41,14 @@ source-repository this
 
 library
   exposed-modules:     Test.DejaFu
-                     , Test.DejaFu.Conc
                      , Test.DejaFu.Common
+                     , Test.DejaFu.Conc
                      , Test.DejaFu.Defaults
+                     , Test.DejaFu.Heap
                      , Test.DejaFu.Refinement
-                     , Test.DejaFu.Schedule
                      , Test.DejaFu.SCT
                      , Test.DejaFu.STM
+                     , Test.DejaFu.Schedule
 
                      , Test.DejaFu.Conc.Internal
                      , Test.DejaFu.Conc.Internal.Common
@@ -71,6 +72,7 @@ library
                      , semigroups        >=0.16 && <0.19
                      , transformers      >=0.4  && <0.6
                      , transformers-base >=0.4  && <0.5
+                     , vault             >=0.3  && <0.4
   -- hs-source-dirs:      
   default-language:    Haskell2010
   ghc-options:         -Wall

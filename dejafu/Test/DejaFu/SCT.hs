@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 -- |
 -- Module      : Test.DejaFu.SCT
@@ -7,7 +8,7 @@
 -- License     : MIT
 -- Maintainer  : Michael Walker <mike@barrucadu.co.uk>
 -- Stability   : experimental
--- Portability : GADTs, GeneralizedNewtypeDeriving
+-- Portability : GADTs, GeneralizedNewtypeDeriving, MultiParamTypeClasses
 --
 -- Systematic testing for concurrent computations.
 module Test.DejaFu.SCT
@@ -103,6 +104,7 @@ import           System.Random            (RandomGen, randomR)
 
 import           Test.DejaFu.Common
 import           Test.DejaFu.Conc
+import qualified Test.DejaFu.Heap         as H
 import           Test.DejaFu.SCT.Internal
 
 -------------------------------------------------------------------------------
@@ -192,15 +194,15 @@ swarmy = Weighted
 -- | Explore possible executions of a concurrent program according to
 -- the given 'Way'.
 --
--- @since 0.6.0.0
-runSCT :: MonadRef r n
+-- @since unreleased
+runSCT :: (H.Heap heap key monad, MonadRef r monad)
   => Way
   -- ^ How to run the concurrent program.
   -> MemType
   -- ^ The memory model to use for non-synchronised @CRef@ operations.
-  -> ConcT r n a
+  -> Conc heap key monad a
   -- ^ The computation to run many times.
-  -> n [(Either Failure a, Trace)]
+  -> monad [(Either Failure a, Trace)]
 runSCT (Systematic cb)      memtype = sctBound memtype cb
 runSCT (Weighted g lim use) memtype = sctWeightedRandom memtype g lim use
 runSCT (Uniform  g lim)     memtype = sctUniformRandom  memtype g lim
@@ -210,24 +212,24 @@ runSCT (Uniform  g lim)     memtype = sctUniformRandom  memtype g lim
 -- Demanding the result of this will force it to normal form, which
 -- may be more efficient in some situations.
 --
--- @since 0.6.0.0
-runSCT' :: (MonadRef r n, NFData a)
-  => Way -> MemType -> ConcT r n a -> n [(Either Failure a, Trace)]
+-- @since unreleased
+runSCT' :: (H.Heap heap key monad, MonadRef r monad, NFData a)
+  => Way -> MemType -> Conc heap key monad  a -> monad [(Either Failure a, Trace)]
 runSCT' way memtype conc = do
   res <- runSCT way memtype conc
   rnf res `seq` pure res
 
 -- | Return the set of results of a concurrent program.
 --
--- @since 0.6.0.0
-resultsSet :: (MonadRef r n, Ord a)
+-- @since unreleased
+resultsSet :: (H.Heap heap key monad, MonadRef r monad, Ord a)
   => Way
   -- ^ How to run the concurrent program.
   -> MemType
   -- ^ The memory model to use for non-synchronised @CRef@ operations.
-  -> ConcT r n a
+  -> Conc heap key monad  a
   -- ^ The computation to run many times.
-  -> n (Set (Either Failure a))
+  -> monad (Set (Either Failure a))
 resultsSet way memtype conc =
   S.fromList . map fst <$> runSCT way memtype conc
 
@@ -236,9 +238,9 @@ resultsSet way memtype conc =
 -- Demanding the result of this will force it to normal form, which
 -- may be more efficient in some situations.
 --
--- @since 0.6.0.0
-resultsSet' :: (MonadRef r n, Ord a, NFData a)
-  => Way -> MemType -> ConcT r n a -> n (Set (Either Failure a))
+-- @since unreleased
+resultsSet' :: (H.Heap heap key monad, MonadRef r monad, Ord a, NFData a)
+  => Way -> MemType -> Conc heap key monad  a -> monad (Set (Either Failure a))
 resultsSet' way memtype conc = do
   res <- resultsSet' way memtype conc
   rnf res `seq` pure res
@@ -385,15 +387,15 @@ lBacktrack = backtrackAt (\_ _ -> False)
 -- do some redundant work as the introduction of a bound can make
 -- previously non-interfering events interfere with each other.
 --
--- @since 0.5.0.0
-sctBound :: MonadRef r n
+-- @since unreleased
+sctBound :: (H.Heap heap key monad, MonadRef r monad)
   => MemType
   -- ^ The memory model to use for non-synchronised @CRef@ operations.
   -> Bounds
   -- ^ The combined bounds.
-  -> ConcT r n a
+  -> Conc heap key monad  a
   -- ^ The computation to run many times
-  -> n [(Either Failure a, Trace)]
+  -> monad [(Either Failure a, Trace)]
 sctBound memtype cb conc = go initialState where
   -- Repeatedly run the computation gathering all the results and
   -- traces into a list until there are no schedules remaining to try.
@@ -432,17 +434,17 @@ sctBound memtype cb conc = go initialState where
 --
 -- This is not guaranteed to find all distinct results.
 --
--- @since 0.7.0.0
-sctUniformRandom :: (MonadRef r n, RandomGen g)
+-- @since unreleased
+sctUniformRandom :: (H.Heap heap key monad, MonadRef r monad, RandomGen g)
   => MemType
   -- ^ The memory model to use for non-synchronised @CRef@ operations.
   -> g
   -- ^ The random number generator.
   -> Int
   -- ^ The number of executions to perform.
-  -> ConcT r n a
+  -> Conc heap key monad  a
   -- ^ The computation to run many times.
-  -> n [(Either Failure a, Trace)]
+  -> monad [(Either Failure a, Trace)]
 sctUniformRandom memtype g0 lim0 conc = go g0 (max 0 lim0) where
   go _ 0 = pure []
   go g n = do
@@ -459,8 +461,8 @@ sctUniformRandom memtype g0 lim0 conc = go g0 (max 0 lim0) where
 --
 -- This is not guaranteed to find all distinct results.
 --
--- @since 0.7.0.0
-sctWeightedRandom :: (MonadRef r n, RandomGen g)
+-- @since unreleased
+sctWeightedRandom :: (H.Heap heap key monad, MonadRef r monad, RandomGen g)
   => MemType
   -- ^ The memory model to use for non-synchronised @CRef@ operations.
   -> g
@@ -469,9 +471,9 @@ sctWeightedRandom :: (MonadRef r n, RandomGen g)
   -- ^ The number of executions to perform.
   -> Int
   -- ^ The number of executions to use the same set of weights for.
-  -> ConcT r n a
+  -> Conc heap key monad  a
   -- ^ The computation to run many times.
-  -> n [(Either Failure a, Trace)]
+  -> monad [(Either Failure a, Trace)]
 sctWeightedRandom memtype g0 lim0 use0 conc = go g0 (max 0 lim0) (max 1 use0) M.empty where
   go _ 0 _ _ = pure []
   go g n 0 _ = go g n (max 1 use0) M.empty

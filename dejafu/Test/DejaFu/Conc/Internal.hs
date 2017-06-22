@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -8,7 +9,7 @@
 -- License     : MIT
 -- Maintainer  : Michael Walker <mike@barrucadu.co.uk>
 -- Stability   : experimental
--- Portability : RankNTypes, ScopedTypeVariables
+-- Portability : FlexibleContexts, MultiParamTypeClasses, RankNTypes, ScopedTypeVariables
 --
 -- Concurrent monads with a fixed scheduler: internal types and
 -- functions. This module is NOT considered to form part of the public
@@ -17,10 +18,9 @@ module Test.DejaFu.Conc.Internal where
 
 import           Control.Exception                   (MaskingState(..),
                                                       toException)
-import           Control.Monad.Ref                   (MonadRef, newRef, readRef,
+import           Control.Monad.Ref                   (MonadRef, readRef,
                                                       writeRef)
 import qualified Data.Foldable                       as F
-import           Data.Functor                        (void)
 import           Data.List                           (sort)
 import           Data.List.NonEmpty                  (NonEmpty(..), fromList)
 import qualified Data.Map.Strict                     as M
@@ -34,6 +34,7 @@ import           Test.DejaFu.Common
 import           Test.DejaFu.Conc.Internal.Common
 import           Test.DejaFu.Conc.Internal.Memory
 import           Test.DejaFu.Conc.Internal.Threading
+import qualified Test.DejaFu.Heap                    as H
 import           Test.DejaFu.Schedule
 import           Test.DejaFu.STM                     (Result(..),
                                                       runTransaction)
@@ -48,17 +49,19 @@ type SeqTrace
 -- | Run a concurrent computation with a given 'Scheduler' and initial
 -- state, returning a failure reason on error. Also returned is the
 -- final state of the scheduler, and an execution trace.
-runConcurrency :: MonadRef r n
-               => Scheduler g
-               -> MemType
-               -> g
-               -> IdSource
-               -> Int
-               -> M n r a
-               -> n (Either Failure a, Context n r g, SeqTrace, Maybe (ThreadId, ThreadAction))
-runConcurrency sched memtype g idsrc caps ma = do
+runConcurrency :: (H.Heap heap key monad, MonadRef r monad)
+  => Scheduler g
+  -> MemType
+  -> g
+  -> IdSource
+  -> Int
+  -> heap
+  -> M heap key monad a
+  -> monad (Either Failure a, Context heap key monad g, SeqTrace, Maybe (ThreadId, ThreadAction))
+runConcurrency sched memtype g idsrc caps heap ma = do
   (c, ref) <- runRefCont AStop (Just . Right) (runM ma)
-  let ctx = Context { cSchedState = g
+  let ctx = Context { cHeap       = heap
+                    , cSchedState = g
                     , cIdSource   = idsrc
                     , cThreads    = launch' Unmasked initialThread (const c) M.empty
                     , cWriteBuf   = emptyBuffer
@@ -69,17 +72,22 @@ runConcurrency sched memtype g idsrc caps ma = do
   pure (fromJust out, finalCtx, trace, finalAction)
 
 -- | The context a collection of threads are running in.
-data Context n r g = Context
-  { cSchedState :: g
+data Context heap key monad g = Context
+  { cHeap       :: heap
+  , cSchedState :: g
   , cIdSource   :: IdSource
-  , cThreads    :: Threads n r
-  , cWriteBuf   :: WriteBuffer r
+  , cThreads    :: Threads heap key monad
+  , cWriteBuf   :: WriteBuffer key
   , cCaps       :: Int
   }
 
 -- | Run a collection of threads, until there are no threads left.
-runThreads :: MonadRef r n
-           => Scheduler g -> MemType -> r (Maybe (Either Failure a)) -> Context n r g -> n (Context n r g, SeqTrace, Maybe (ThreadId, ThreadAction))
+runThreads :: (H.Heap heap key monad, MonadRef r monad)
+  => Scheduler g
+  -> MemType
+  -> r (Maybe (Either Failure a))
+  -> Context heap key monad g
+  -> monad (Context heap key monad g, SeqTrace, Maybe (ThreadId, ThreadAction))
 runThreads sched memtype ref = go Seq.empty [] Nothing where
   -- sofar is the 'SeqTrace', sofarSched is the @[(Decision,
   -- ThreadAction)]@ trace the scheduler needs.
@@ -160,18 +168,18 @@ data Act
 
 -- | Run a single thread one step, by dispatching on the type of
 -- 'Action'.
-stepThread :: forall n r g. MonadRef r n
+stepThread :: forall heap key monad r g. (H.Heap heap key monad, MonadRef r monad)
   => Scheduler g
   -- ^ The scheduler.
   -> MemType
   -- ^ The memory model to use.
   -> ThreadId
   -- ^ ID of the current thread
-  -> Action n r
+  -> Action heap key monad
   -- ^ Action to step
-  -> Context n r g
+  -> Context heap key monad g
   -- ^ The execution context.
-  -> n (Either Failure (Context n r g), Act)
+  -> monad (Either Failure (Context heap key monad g), Act)
 stepThread sched memtype tid action ctx = case action of
     -- start a new thread, assigning it the next 'ThreadId'
     AFork n a b -> pure $
@@ -180,146 +188,148 @@ stepThread sched memtype tid action ctx = case action of
         in (Right ctx { cThreads = goto (b newtid) tid threads', cIdSource = idSource' }, Single (Fork newtid))
 
     -- get the 'ThreadId' of the current thread
-    AMyTId c -> simple (goto (c tid) tid (cThreads ctx)) MyThreadId
+    AMyTId c -> simple (cHeap ctx) (goto (c tid) tid (cThreads ctx)) MyThreadId
 
     -- get the number of capabilities
-    AGetNumCapabilities c -> simple (goto (c (cCaps ctx)) tid (cThreads ctx)) $ GetNumCapabilities (cCaps ctx)
+    AGetNumCapabilities c -> simple (cHeap ctx) (goto (c (cCaps ctx)) tid (cThreads ctx)) $ GetNumCapabilities (cCaps ctx)
 
     -- set the number of capabilities
     ASetNumCapabilities i c -> pure
       (Right ctx { cThreads = goto c tid (cThreads ctx), cCaps = i }, Single (SetNumCapabilities i))
 
     -- yield the current thread
-    AYield c -> simple (goto c tid (cThreads ctx)) Yield
+    AYield c -> simple (cHeap ctx) (goto c tid (cThreads ctx)) Yield
 
     -- create a new @MVar@, using the next 'MVarId'.
     ANewMVar n c -> do
       let (idSource', newmvid) = nextMVId n (cIdSource ctx)
-      ref <- newRef Nothing
-      let mvar = MVar newmvid ref
-      pure (Right ctx { cThreads = goto (c mvar) tid (cThreads ctx), cIdSource = idSource' }, Single (NewMVar newmvid))
+      (key, heap') <- H.insert Nothing (cHeap ctx)
+      let mvar = MVar newmvid key
+      pure (Right ctx { cHeap = heap', cThreads = goto (c mvar) tid (cThreads ctx), cIdSource = idSource' }, Single (NewMVar newmvid))
 
     -- put a value into a @MVar@, blocking the thread until it's empty.
-    APutMVar cvar@(MVar cvid _) a c -> synchronised $ do
-      (success, threads', woken) <- putIntoMVar cvar a c tid (cThreads ctx)
-      simple threads' $ if success then PutMVar cvid woken else BlockedPutMVar cvid
+    APutMVar cvar@(MVar cvid _) a c -> synchronised $
+      let (heap', success, threads', woken) = putIntoMVar cvar a c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ if success then PutMVar cvid woken else BlockedPutMVar cvid
 
     -- try to put a value into a @MVar@, without blocking.
-    ATryPutMVar cvar@(MVar cvid _) a c -> synchronised $ do
-      (success, threads', woken) <- tryPutIntoMVar cvar a c tid (cThreads ctx)
-      simple threads' $ TryPutMVar cvid success woken
+    ATryPutMVar cvar@(MVar cvid _) a c -> synchronised $
+      let (heap', success, threads', woken) = tryPutIntoMVar cvar a c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ TryPutMVar cvid success woken
 
     -- get the value from a @MVar@, without emptying, blocking the
     -- thread until it's full.
-    AReadMVar cvar@(MVar cvid _) c -> synchronised $ do
-      (success, threads', _) <- readFromMVar cvar c tid (cThreads ctx)
-      simple threads' $ if success then ReadMVar cvid else BlockedReadMVar cvid
+    AReadMVar cvar@(MVar cvid _) c -> synchronised $
+      let (heap', success, threads', _) = readFromMVar cvar c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ if success then ReadMVar cvid else BlockedReadMVar cvid
 
     -- try to get the value from a @MVar@, without emptying, without
     -- blocking.
-    ATryReadMVar cvar@(MVar cvid _) c -> synchronised $ do
-      (success, threads', _) <- tryReadFromMVar cvar c tid (cThreads ctx)
-      simple threads' $ TryReadMVar cvid success
+    ATryReadMVar cvar@(MVar cvid _) c -> synchronised $
+      let (heap', success, threads', _) = tryReadFromMVar cvar c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ TryReadMVar cvid success
 
     -- take the value from a @MVar@, blocking the thread until it's
     -- full.
-    ATakeMVar cvar@(MVar cvid _) c -> synchronised $ do
-      (success, threads', woken) <- takeFromMVar cvar c tid (cThreads ctx)
-      simple threads' $ if success then TakeMVar cvid woken else BlockedTakeMVar cvid
+    ATakeMVar cvar@(MVar cvid _) c -> synchronised $
+      let (heap', success, threads', woken) = takeFromMVar cvar c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ if success then TakeMVar cvid woken else BlockedTakeMVar cvid
 
     -- try to take the value from a @MVar@, without blocking.
-    ATryTakeMVar cvar@(MVar cvid _) c -> synchronised $ do
-      (success, threads', woken) <- tryTakeFromMVar cvar c tid (cThreads ctx)
-      simple threads' $ TryTakeMVar cvid success woken
+    ATryTakeMVar cvar@(MVar cvid _) c -> synchronised $
+      let (heap', success, threads', woken) = tryTakeFromMVar cvar c tid (cThreads ctx) (cHeap ctx)
+      in simple heap' threads' $ TryTakeMVar cvid success woken
 
     -- create a new @CRef@, using the next 'CRefId'.
     ANewCRef n a c -> do
       let (idSource', newcrid) = nextCRId n (cIdSource ctx)
-      ref <- newRef (M.empty, 0, a)
-      let cref = CRef newcrid ref
-      pure (Right ctx { cThreads = goto (c cref) tid (cThreads ctx), cIdSource = idSource' }, Single (NewCRef newcrid))
+      (key, heap') <- H.insert (M.empty, 0, a) (cHeap ctx)
+      let cref = CRef newcrid key
+      pure (Right ctx { cHeap = heap', cThreads = goto (c cref) tid (cThreads ctx), cIdSource = idSource' }, Single (NewCRef newcrid))
 
     -- read from a @CRef@.
-    AReadCRef cref@(CRef crid _) c -> do
-      val <- readCRef cref tid
-      simple (goto (c val) tid (cThreads ctx)) $ ReadCRef crid
+    AReadCRef cref@(CRef crid _) c ->
+      let val = readCRef cref tid (cHeap ctx)
+      in simple (cHeap ctx) (goto (c val) tid (cThreads ctx)) $ ReadCRef crid
 
     -- read from a @CRef@ for future compare-and-swap operations.
-    AReadCRefCas cref@(CRef crid _) c -> do
-      tick <- readForTicket cref tid
-      simple (goto (c tick) tid (cThreads ctx)) $ ReadCRefCas crid
+    AReadCRefCas cref@(CRef crid _) c ->
+      let tick = readForTicket cref tid (cHeap ctx)
+      in simple (cHeap ctx) (goto (c tick) tid (cThreads ctx)) $ ReadCRefCas crid
 
     -- modify a @CRef@.
-    AModCRef cref@(CRef crid _) f c -> synchronised $ do
-      (new, val) <- f <$> readCRef cref tid
-      writeImmediate cref new
-      simple (goto (c val) tid (cThreads ctx)) $ ModCRef crid
+    AModCRef cref@(CRef crid _) f c -> synchronised $
+      let (new, val) = f (readCRef cref tid (cHeap ctx))
+          heap' = writeImmediate cref new (cHeap ctx)
+      in simple heap' (goto (c val) tid (cThreads ctx)) $ ModCRef crid
 
     -- modify a @CRef@ using a compare-and-swap.
-    AModCRefCas cref@(CRef crid _) f c -> synchronised $ do
-      tick@(Ticket _ _ old) <- readForTicket cref tid
-      let (new, val) = f old
-      void $ casCRef cref tid tick new
-      simple (goto (c val) tid (cThreads ctx)) $ ModCRefCas crid
+    AModCRefCas cref@(CRef crid _) f c -> synchronised $
+      let tick@(Ticket _ _ _ old) = readForTicket cref tid (cHeap ctx)
+          (new, val) = f old
+          (heap', _, _) = casCRef cref tid tick new (cHeap ctx)
+      in simple heap' (goto (c val) tid (cThreads ctx)) $ ModCRefCas crid
 
     -- write to a @CRef@ without synchronising.
     AWriteCRef cref@(CRef crid _) a c -> case memtype of
       -- write immediately.
-      SequentialConsistency -> do
-        writeImmediate cref a
-        simple (goto c tid (cThreads ctx)) $ WriteCRef crid
+      SequentialConsistency ->
+        let heap' = writeImmediate cref a (cHeap ctx)
+        in simple heap' (goto c tid (cThreads ctx)) $ WriteCRef crid
       -- add to buffer using thread id.
-      TotalStoreOrder -> do
-        wb' <- bufferWrite (cWriteBuf ctx) (tid, Nothing) cref a
-        pure (Right ctx { cThreads = goto c tid (cThreads ctx), cWriteBuf = wb' }, Single (WriteCRef crid))
+      TotalStoreOrder ->
+        let (heap', wb') = bufferWrite (cWriteBuf ctx) (tid, Nothing) cref a (cHeap ctx)
+        in pure (Right ctx { cHeap = heap', cThreads = goto c tid (cThreads ctx), cWriteBuf = wb' }, Single (WriteCRef crid))
       -- add to buffer using both thread id and cref id
-      PartialStoreOrder -> do
-        wb' <- bufferWrite (cWriteBuf ctx) (tid, Just crid) cref a
-        pure (Right ctx { cThreads = goto c tid (cThreads ctx), cWriteBuf = wb' }, Single (WriteCRef crid))
+      PartialStoreOrder ->
+        let (heap', wb') = bufferWrite (cWriteBuf ctx) (tid, Just crid) cref a (cHeap ctx)
+        in pure (Right ctx { cHeap = heap', cThreads = goto c tid (cThreads ctx), cWriteBuf = wb' }, Single (WriteCRef crid))
 
     -- perform a compare-and-swap on a @CRef@.
-    ACasCRef cref@(CRef crid _) tick a c -> synchronised $ do
-      (suc, tick') <- casCRef cref tid tick a
-      simple (goto (c (suc, tick')) tid (cThreads ctx)) $ CasCRef crid suc
+    ACasCRef cref@(CRef crid _) tick a c -> synchronised $
+      let (heap', suc, tick') = casCRef cref tid tick a (cHeap ctx)
+      in simple heap' (goto (c (suc, tick')) tid (cThreads ctx)) $ CasCRef crid suc
 
     -- commit a @CRef@ write
-    ACommit t c -> do
-      wb' <- case memtype of
-        -- shouldn't ever get here
-        SequentialConsistency ->
-          error "Attempting to commit under SequentialConsistency"
-        -- commit using the thread id.
-        TotalStoreOrder -> commitWrite (cWriteBuf ctx) (t, Nothing)
-        -- commit using the cref id.
-        PartialStoreOrder -> commitWrite (cWriteBuf ctx) (t, Just c)
-      pure (Right ctx { cWriteBuf = wb' }, Single (CommitCRef t c))
+    ACommit t c ->
+      let (heap', wb') = case memtype of
+            -- shouldn't ever get here
+            SequentialConsistency ->
+              error "Attempting to commit under SequentialConsistency"
+            -- commit using the thread id.
+            TotalStoreOrder ->
+              commitWrite (cWriteBuf ctx) (t, Nothing) (cHeap ctx)
+            -- commit using the cref id.
+            PartialStoreOrder ->
+              commitWrite (cWriteBuf ctx) (t, Just c) (cHeap ctx)
+      in pure (Right ctx { cHeap = heap', cWriteBuf = wb' }, Single (CommitCRef t c))
 
     -- run a STM transaction atomically.
     AAtom stm c -> synchronised $ do
-      (res, idSource', trace) <- runTransaction stm (cIdSource ctx)
+      (heap', res, idSource', trace) <- runTransaction stm (cIdSource ctx) (cHeap ctx)
       case res of
         Success _ written val ->
           let (threads', woken) = wake (OnTVar written) (cThreads ctx)
-          in pure (Right ctx { cThreads = goto (c val) tid threads', cIdSource = idSource' }, Single (STM trace woken))
+          in pure (Right ctx { cHeap = heap', cThreads = goto (c val) tid threads', cIdSource = idSource' }, Single (STM trace woken))
         Retry touched ->
           let threads' = block (OnTVar touched) tid (cThreads ctx)
-          in pure (Right ctx { cThreads = threads', cIdSource = idSource'}, Single (BlockedSTM trace))
+          in pure (Right ctx { cHeap = heap', cThreads = threads', cIdSource = idSource'}, Single (BlockedSTM trace))
         Exception e -> do
           let act = STM trace []
-          res' <- stepThrow tid (cThreads ctx) act e
+          res' <- stepThrow heap' tid (cThreads ctx) act e
           pure $ case res' of
-            (Right ctx', _) -> (Right ctx' { cIdSource = idSource' }, Single act)
+            (Right ctx', _) -> (Right ctx', Single act)
             (Left err, _) -> (Left err, Single act)
 
     -- lift an action from the underlying monad into the @Conc@
     -- computation.
     ALift na -> do
       a <- na
-      simple (goto a tid (cThreads ctx)) LiftIO
+      simple (cHeap ctx) (goto a tid (cThreads ctx)) LiftIO
 
     -- throw an exception, and propagate it to the appropriate
     -- handler.
-    AThrow e -> stepThrow tid (cThreads ctx) Throw e
+    AThrow e -> stepThrow (cHeap ctx) tid (cThreads ctx) Throw e
 
     -- throw an exception to the target thread, and propagate it to
     -- the appropriate handler.
@@ -328,21 +338,21 @@ stepThread sched memtype tid action ctx = case action of
           blocked  = block (OnMask t) tid (cThreads ctx)
       in case M.lookup t (cThreads ctx) of
            Just thread
-             | interruptible thread -> stepThrow t threads' (ThrowTo t) e
-             | otherwise -> simple blocked $ BlockedThrowTo t
-           Nothing -> simple threads' $ ThrowTo t
+             | interruptible thread -> stepThrow (cHeap ctx) t threads' (ThrowTo t) e
+             | otherwise -> simple (cHeap ctx) blocked $ BlockedThrowTo t
+           Nothing -> simple (cHeap ctx) threads' $ ThrowTo t
 
     -- run a subcomputation in an exception-catching context.
     ACatching h ma c ->
       let a        = runCont ma      (APopCatching . c)
           e exc    = runCont (h exc) (APopCatching . c)
           threads' = goto a tid (catching e tid (cThreads ctx))
-      in simple threads' Catching
+      in simple (cHeap ctx) threads' Catching
 
     -- pop the top exception handler from the thread's stack.
     APopCatching a ->
       let threads' = goto a tid (uncatching tid (cThreads ctx))
-      in simple threads' PopCatching
+      in simple (cHeap ctx) threads' PopCatching
 
     -- execute a subcomputation with a new masking state, and give it
     -- a function to run a computation with the current masking state.
@@ -352,28 +362,29 @@ stepThread sched memtype tid action ctx = case action of
           umask mb = resetMask True m' >> mb >>= \b -> resetMask False m >> pure b
           resetMask typ ms = cont $ \k -> AResetMask typ True ms $ k ()
           threads' = goto a tid (mask m tid (cThreads ctx))
-      in simple threads' $ SetMasking False m
+      in simple (cHeap ctx) threads' $ SetMasking False m
 
 
     -- reset the masking thread of the state.
     AResetMask b1 b2 m c ->
       let act      = (if b1 then SetMasking else ResetMasking) b2 m
           threads' = goto c tid (mask m tid (cThreads ctx))
-      in simple threads' act
+      in simple (cHeap ctx) threads' act
 
     -- execute a 'return' or 'pure'.
-    AReturn c -> simple (goto c tid (cThreads ctx)) Return
+    AReturn c -> simple (cHeap ctx) (goto c tid (cThreads ctx)) Return
 
     -- kill the current thread.
-    AStop na -> na >> simple (kill tid (cThreads ctx)) Stop
+    AStop na -> na >> simple (cHeap ctx) (kill tid (cThreads ctx)) Stop
 
     -- run a subconcurrent computation.
     ASub ma c
       | M.size (cThreads ctx) > 1 -> pure (Left IllegalSubconcurrency, Single Subconcurrency)
       | otherwise -> do
           (res, ctx', trace, finalDecision) <-
-            runConcurrency sched memtype (cSchedState ctx) (cIdSource ctx) (cCaps ctx) ma
-          pure (Right ctx { cThreads    = goto (AStopSub (c res)) tid (cThreads ctx)
+            runConcurrency sched memtype (cSchedState ctx) (cIdSource ctx) (cCaps ctx) (cHeap ctx) ma
+          pure (Right ctx { cHeap       = cHeap ctx'
+                          , cThreads    = goto (AStopSub (c res)) tid (cThreads ctx)
                           , cIdSource   = cIdSource ctx'
                           , cSchedState = cSchedState ctx' }, SubC trace finalDecision)
 
@@ -381,26 +392,24 @@ stepThread sched memtype tid action ctx = case action of
     -- only exists so that: there is an entry in the trace for
     -- returning to normal computation; and every item in the trace
     -- corresponds to a scheduling point.
-    AStopSub c -> simple (goto c tid (cThreads ctx)) StopSubconcurrency
+    AStopSub c -> simple (cHeap ctx) (goto c tid (cThreads ctx)) StopSubconcurrency
   where
 
     -- this is not inline in the long @case@ above as it's needed by
     -- @AAtom@, @AThrow@, and @AThrowTo@.
-    stepThrow t ts act e =
+    stepThrow heap t ts act e =
       case propagate (toException e) t ts of
-        Just ts' -> simple ts' act
+        Just ts' -> simple heap ts' act
         Nothing
           | t == initialThread -> pure (Left UncaughtException, Single act)
-          | otherwise -> simple (kill t ts) act
+          | otherwise -> simple heap (kill t ts) act
 
     -- helper for actions which only change the threads.
-    simple threads' act = pure (Right ctx { cThreads = threads' }, Single act)
+    simple heap' threads' act = pure (Right ctx { cHeap = heap', cThreads = threads' }, Single act)
 
     -- helper for actions impose a write barrier.
     synchronised ma = do
-      writeBarrier (cWriteBuf ctx)
       res <- ma
-
       pure $ case res of
-        (Right ctx', act) -> (Right ctx' { cWriteBuf = emptyBuffer }, act)
+        (Right ctx', act) -> (Right ctx' { cHeap = writeBarrier (cWriteBuf ctx) (cHeap ctx'), cWriteBuf = emptyBuffer }, act)
         _ -> res

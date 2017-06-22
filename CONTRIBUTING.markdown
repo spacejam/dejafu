@@ -161,6 +161,8 @@ dejafusIO = dejafusWayIO defaultWay defaultMemType
 
 - the API for a function is its type, the API for a type is its
   constructors
+- adding a class constraint to a function is a significant change,
+  removing one is not
 - moving a definition to a different module is an API change
 - version numbers will be filled in when a release is made, using
   "@since unreleased" makes it easy to find the necessary places

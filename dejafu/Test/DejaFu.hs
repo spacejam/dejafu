@@ -7,7 +7,7 @@
 -- License     : MIT
 -- Maintainer  : Michael Walker <mike@barrucadu.co.uk>
 -- Stability   : experimental
--- Portability : RankNTypes
+-- Portability : MultiParamTypeClasses, RankNTypes
 --
 -- Deterministic testing for concurrent computations.
 --
@@ -284,6 +284,7 @@ import           Data.Ord               (comparing)
 import           Test.DejaFu.Common
 import           Test.DejaFu.Conc
 import           Test.DejaFu.Defaults
+import qualified Test.DejaFu.Heap       as H
 import           Test.DejaFu.Refinement
 import           Test.DejaFu.SCT
 
@@ -512,16 +513,16 @@ runTestWay way memtype predicate conc =
 
 -- | Monad-polymorphic variant of 'runTest'.
 --
--- @since 0.4.0.0
-runTestM :: MonadRef r n
-         => Predicate a -> ConcT r n a -> n (Result a)
+-- @since unreleased
+runTestM :: (H.Heap heap key monad, MonadRef r monad)
+  => Predicate a -> Conc heap key monad  a -> monad (Result a)
 runTestM = runTestWayM defaultWay defaultMemType
 
 -- | Monad-polymorphic variant of 'runTest''.
 --
--- @since 0.6.0.0
-runTestWayM :: MonadRef r n
-            => Way -> MemType -> Predicate a -> ConcT r n a -> n (Result a)
+-- @since unreleased
+runTestWayM :: (H.Heap heap key monad, MonadRef r monad)
+  => Way -> MemType -> Predicate a -> Conc heap key monad  a -> monad (Result a)
 runTestWayM way memtype predicate conc =
   predicate <$> runSCT way memtype conc
 
